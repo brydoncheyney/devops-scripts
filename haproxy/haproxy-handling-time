@@ -1,0 +1,132 @@
+#!/usr/bin/env bash
+
+set -eou pipefail
+
+function usage() {
+  cat <<USAGE
+usage: $0 [OPTIONS] [FILE]
+
+Parses an haproxy log FILE, or standard input, for a given SERVICE and reports
+on requests that exceed a given THRESHOLD. Requests are reported by total
+handling time (Tt) in descending order.
+
+Options:
+ -s the SERVICE to query; defaults to all
+ -t THRESHOLD in milliseconds; defaults to 2000
+ -T TIMER to check threshold against; Tq, Tr, Tt; defaults to Tt
+ -h display this help text and exit
+
+With no FILE, or when FILE is -, read standard input.
+
+Output format:
+
+ See [http://www.haproxy.org/download/1.5/doc/configuration.txt]
+
+Example:
+
+  2016-08-04T13:42:45+01:00 127.0.0.1:36802 postcodeservice/localhost:6060 9 \
+  840 849 200 "GET /postcode/BN2%205QL HTTP/1.1"
+
+  Field   Format                                Extract from the example above
+      1   datetime                                   2016-08-04T13:42:45+01:00
+      2   client_ip ':' client_port                            127.0.0.1:36802
+      3   backend_name '/' server_name          postcodeservice/localhost:6060
+      4   Tq                                                                 9
+      5   Tr                                                               840
+      6   Tt                                                               849
+      7   status_code                                                      200
+      8   '"' http_request '"'              "GET /postcode/BN2%205QL HTTP/1.1"
+
+Timers:
+
+  - "Tq" is the total time in milliseconds spent waiting for the client to send
+    a full HTTP request, not counting data. It can be "-1" if the connection
+    was aborted before a complete request could be received. It should always
+    be very small because a request generally fits in one single packet. Large
+    times here generally indicate network trouble between the client and
+    haproxy. See "Timers" below for more details.
+
+  - "Tr" is the total time in milliseconds spent waiting for the server to send
+    a full HTTP response, not counting data. It can be "-1" if the request was
+    aborted before a complete response could be received. It generally matches
+    the server's processing time for the request, though it may be altered by
+    the amount of data sent by the client to the server. Large times here on
+    "GET" requests generally indicate an overloaded server. See "Timers" below
+    for more details.
+
+  - "Tt" is the total time in milliseconds elapsed between the accept and the
+    last close. It covers all possible processings. There is one exception, if
+    "option logasap" was specified, then the time counting stops at the moment
+    the log is emitted. In this case, a '+' sign is prepended before the value,
+    indicating that the final one will be larger. See "Timers" below for more
+    details.
+USAGE
+  exit;
+}
+
+declare -A TIMERS
+declare -A HTTP_REQUEST
+
+# positional attributes in expanded haproxy format
+DATETIME=\$1
+SOURCE=\$4
+BACKEND=\$7
+
+# expanded TIMERS
+# - 9/0/0/840/849
+# + 9 0 0 840 849
+TIMERS[Tq]=\$8
+TIMERS[Tr]=\$11
+TIMERS[Tt]=\$12
+
+THRESHOLD=2000
+TIMER=Tt
+SERVICE=""
+COMMAND=$(which cat)
+
+while getopts ":hs:t:T:" arg; do
+  case ${arg} in
+    h)
+      usage
+      ;;
+    s)
+      SERVICE=${OPTARG,,} # force lowercase
+      ;;
+    t)
+      THRESHOLD=${OPTARG}
+      ;;
+    T)
+      TIMER=${OPTARG}
+      [[ $TIMER =~ ^T[qrt]{1}$ ]] || {
+        echo "Invalid TIMER [Tq Tr Tt]: ${OPTARG}" >&2
+        exit 1;
+      }
+      ;;
+    \?)
+      echo "Invalid option: -${OPTARG}" >&2
+      exit 1;
+      ;;
+    :)
+      echo "Option -${OPTARG} requires an argument" >&2
+      exit 1
+      ;;
+  esac
+done
+
+shift $((OPTIND-1))
+
+FILE=${1:-/dev/stdin}
+
+[[ -z "${THRESHOLD}" || -z "${FILE}" ]] && usage
+
+XZ_FILE_TYPE=$(file ${FILE} | awk -F: '{print $2}')
+
+[[ "${XZ_FILE_TYPE}" == *xz* ]] && COMMAND=$(which xzcat)
+
+# strip leading '$' from positional value for use in `sort'
+SORT_FIELD=${TIMERS[$TIMER]:1}
+
+${COMMAND} ${FILE} \
+  | awk 'gsub("/", " ", $8);' \
+  | awk "/${SERVICE}\/localhost/ && ${TIMERS[$TIMER]} > ${THRESHOLD}" \
+  | sort -k${SORT_FIELD},${SORT_FIELD} -rn

@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Erik Ljungstrom 27/05/2011
+# Brydon Cheyney 15/09/2016
+
+set -ou pipefail
+
+function usage() {
+  cat <<USAGE
+usage: $0
+
+Get current swap usage for all running processes.
+
+This will need to be ran as root for it to be able to gather accurate numbers.
+It will still work even if you don.t, but it will report 0 for any processes
+not owned by your user.
+
+Examples:
+
+  # top 10 swap usage
+  ./$0 | sort -t: -k2 -rn | head -n 11
+USAGE
+  exit 0;
+}
+
+[[ $# -gt 0 ]] && usage
+
+for dir in `find /proc/ -maxdepth 1 -type d | egrep "^/proc/[0-9]"`
+do
+  sum=0
+  pid=$(echo ${dir} | cut -d / -f 3)
+  cmd=$(ps -p ${pid} -o cmd --no-headers)
+  for swap in $(grep Swap ${dir}/smaps 2>/dev/null| awk '{print $2}')
+  do
+    sum=$(expr ${sum} + ${swap})
+  done
+  echo "${pid}:${sum}:${cmd}"
+done
